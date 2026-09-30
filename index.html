@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Fish Aura Battle - Balanced Edition</title>
+<style>
+:root{--ink:#ffffff;--gold:#ffd700}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#021226;overflow:hidden;touch-action:none;font-family:"Comic Sans MS","Chalkboard SE","Sarabun",sans-serif;user-select:none;-webkit-user-select:none}
+canvas{display:block;width:100%;height:100%}
+#ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:15px;color:var(--ink);text-align:center;background:rgba(5,30,60,.88);padding:20px;z-index:10}
+#ov.hide{display:none}
+h1{margin:0;font-size:clamp(26px,5vw,44px);color:var(--gold);text-shadow:0 4px 0 #ff6b6b,0 8px 15px rgba(0,0,0,0.4)}
+p{margin:0;max-width:500px;line-height:1.5;font-size:15px}
+button{font:inherit;font-size:18px;font-weight:bold;color:#fff;background:linear-gradient(135deg,#ff7675,#d63031);border:3px solid #fff;border-radius:30px;padding:12px 32px;cursor:pointer;box-shadow:0 5px 15px rgba(0,0,0,0.3);transition:transform .1s}
+button:active{transform:scale(.95)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ov"></div>
+
+<script>
+const $=id=>document.getElementById(id),cv=$('c'),ctx=cv.getContext('2d'),ov=$('ov');
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+// Web Audio API ระบบเสียง
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function initAudio(){ if(!audioCtx) audioCtx = new AudioCtx(); }
+
+function playSound(freq1, freq2, duration, type='sine'){
+  if(!audioCtx) return;
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq1, audioCtx.currentTime);
+  if(freq2) osc.frequency.exponentialRampToValueAtTime(freq2, audioCtx.currentTime + duration);
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+const WORLD = { w: 3500, h: 2000, surfaceY: 200 }; 
+let W, H, camera = { x: 0, y: 0 };
+let bubbles = [], freeMinions = [];
+
+function generateWorld(){
+  bubbles = []; freeMinions = [];
+  for(let i=0; i<50; i++){
+    bubbles.push({ x: Math.random()*WORLD.w, y: Math.random()*WORLD.h, r: 3+Math.random()*5, speed: 15+Math.random()*25 });
+  }
+  // สปอว์นลูกปลาอิสระตามฉาก
+  for(let i=0; i<40; i++){
+    freeMinions.push({
+      x: Math.random()*WORLD.w,
+      y: WORLD.surfaceY + 80 + Math.random()*(WORLD.h - WORLD.surfaceY - 160),
+      r: 5, hue: Math.random()*360
+    });
+  }
+}
+
+function resize(){
+  const d=devicePixelRatio||1; W=innerWidth; H=innerHeight;
+  cv.width=W*d; cv.height=H*d; ctx.setTransform(d,0,0,d,0,0);
+}
+addEventListener('resize',resize); resize(); generateWorld();
+
+const S = { mode:'menu', kills:0, t:0, fish:[] };
+
+// ตัวละครผู้เล่น
+const P = {
+  x: WORLD.w/2, y: WORLD.h/2, vx:0, vy:0, dir:1, r:22,
+  minions: 3, level: 1, auraR: 60, hue: 10
+};
+
+function menu(){
+  S.mode='menu'; ov.className='';
+  ov.innerHTML = `
+    <h1>🌊 Fish Aura Battle 🌊</h1>
+    <p>ดูดลูกปลาเข้าวงกลมอิทธิพล ยิ่งลูกเยอะเลเวลยิ่งสูง! ชนกลืนปลาตัวอื่นเพื่อเพิ่มสถิติการฆ่า</p>
+    <button onclick="initAudio(); startGame()">เริ่มเล่นเลย!</button>
+  `;
+}
+
+function startGame(){
+  Object.assign(S, { mode:'play', kills:0, fish:[] });
+  P.x = WORLD.w/2; P.y = WORLD.h/2; P.vx = P.vy = 0;
+  P.minions = 3; P.level = 1; P.auraR = 60;
+  generateWorld();
+
+  // สปอว์น AI 10 ตัว
+  for(let i=0; i<10; i++){ spawnAI(); }
+  ov.className='hide';
+}
+
+function spawnAI(){
+  const spawnX = Math.random() * WORLD.w;
+  const spawnY = WORLD.surfaceY + 100 + Math.random() * (WORLD.h - WORLD.surfaceY - 200);
+  const startMinions = Math.floor(2 + Math.random() * 6);
+
+  S.fish.push({
+    x: spawnX, y: spawnY, r: 22,
+    vx: (Math.random()-.5)*20, vy: (Math.random()-.5)*20,
+    dir: 1, minions: startMinions, level: 1, auraR: 60,
+    hue: Math.random()*360, changeDirTimer: 0
+  });
+}
+
+function update(dt){
+  S.t += dt;
+  if(S.mode !== 'play') return;
+
+  // คำนวณ Level และ รัศมีวงกลมขอบเขต จากจำนวนลูกปลาในวง
+  P.level = 1 + Math.floor(P.minions / 3);
+  P.auraR = 55 + P.minions * 4.5;
+
+  // ปรับความเร็วเดินให้ช้าลงและเท่าเทียมกัน (Speed = 130)
+  const baseSpeed = 130;
+  P.vx += (touchTarget.x * baseSpeed - P.vx) * Math.min(1, dt * 6);
+  P.vy += (touchTarget.y * baseSpeed - P.vy) * Math.min(1, dt * 6);
+  
+  P.x = clamp(P.x + P.vx * dt, P.r, WORLD.w - P.r);
+  P.y = clamp(P.y + P.vy * dt, WORLD.surfaceY + P.r, WORLD.h - P.r);
+  if(Math.abs(P.vx) > .1) P.dir = P.vx > 0 ? 1 : -1;
+
+  // กล้องติดตามผู้เล่น
+  camera.x += (P.x - W/2 - camera.x) * dt * 4;
+  camera.y += (P.y - H/2 - camera.y) * dt * 4;
+
+  // ฟองอากาศ
+  for(const b of bubbles){
+    b.y -= b.speed * dt;
+    if(b.y < 0){ b.y = WORLD.h; b.x = Math.random()*WORLD.w; }
+  }
+
+  // กินลูกปลาอิสระตามฉาก
+  for(let i = freeMinions.length - 1; i >= 0; i--){
+    const fm = freeMinions[i];
+    // ดูดเข้าวงผู้เล่น
+    if(Math.hypot(P.x - fm.x, P.y - fm.y) < P.auraR){
+      P.minions++;
+      playSound(300, 600, 0.08);
+      freeMinions.splice(i, 1);
+      spawnFreeMinion();
+      continue;
+    }
+    // AI ดูดลูกปลาอิสระ
+    for(const f of S.fish){
+      if(Math.hypot(f.x - fm.x, f.y - fm.y) < f.auraR){
+        f.minions++;
+        freeMinions.splice(i, 1);
+        spawnFreeMinion();
+        break;
+      }
+    }
+  }
+
+  // อัปเดต AI (เล่นเหมือนคนจริง)
+  for(let i = S.fish.length - 1; i >= 0; i--){
+    const f = S.fish[i];
+    f.level = 1 + Math.floor(f.minions / 3);
+    f.auraR = 55 + f.minions * 4.5;
+
+    // ระบบ AI ตัดสินใจว่ายหาลูกปลา หรือ หนี/ไล่ปลาอื่น
+    f.changeDirTimer -= dt;
+    if(f.changeDirTimer <= 0){
+      f.changeDirTimer = 1.5 + Math.random()*2;
+      
+      // หาเป้าหมายที่ใกล้ที่สุด
+      let targetX = f.x + (Math.random()-.5)*300;
+      let targetY = f.y + (Math.random()-.5)*300;
+
+      const distToP = Math.hypot(P.x - f.x, P.y - f.y);
+      if(distToP < 300){
+        if(f.minions > P.minions){ // ถ้าชนะจะว่ายไล่เรา
+          targetX = P.x; targetY = P.y;
+        } else if(f.minions < P.minions){ // ถ้าแพ้จะว่ายหนี
+          targetX = f.x - (P.x - f.x); targetY = f.y - (P.y - f.y);
+        }
+      }
+
+      const angle = Math.atan2(targetY - f.y, targetX - f.x);
+      f.vx = Math.cos(angle) * baseSpeed;
+      f.vy = Math.sin(angle) * baseSpeed;
+    }
+
+    f.x = clamp(f.x + f.vx * dt, f.r, WORLD.w - f.r);
+    f.y = clamp(f.y + f.vy * dt, WORLD.surfaceY + f.r, WORLD.h - f.r);
+    if(Math.abs(f.vx) > .1) f.dir = f.vx > 0 ? 1 : -1;
+
+    // การชนกันของเส้นวงกลม (Aura Collision)
+    const distToP = Math.hypot(P.x - f.x, P.y - f.y);
+    if(distToP < P.auraR + f.auraR){
+      if(P.minions > f.minions){
+        // เราดูดลูกปลาของ AI เข้าวงเรา
+        if(f.minions > 0){
+          f.minions -= dt * 4;
+          P.minions += dt * 4;
+          playSound(200, 400, 0.05);
+        } else if(distToP < P.r + f.r + 10){
+          // กลืนตัว AI จนตุย!
+          S.kills++;
+          playSound(600, 900, 0.2, 'triangle');
+          S.fish.splice(i, 1);
+          spawnAI();
+        }
+      } else if(P.minions < f.minions){
+        // AI ดูดลูกปลาจากเรา
+        if(P.minions > 0){
+          P.minions = Math.max(0, P.minions - dt * 4);
+          f.minions += dt * 4;
+          playSound(150, 80, 0.05, 'sawtooth');
+        } else if(distToP < P.r + f.r + 10){
+          // เราโดนกลืนจนแพ้
+          S.mode='menu';
+          alert("คุณโดนกลืนจนตุย! สถิติกำจัด AI: " + S.kills + " ตัว");
+          menu();
+          return;
+        }
+      }
+    }
+  }
+}
+
+function spawnFreeMinion(){
+  freeMinions.push({
+    x: Math.random()*WORLD.w,
+    y: WORLD.surfaceY + 80 + Math.random()*(WORLD.h - WORLD.surfaceY - 160),
+    r: 5, hue: Math.random()*360
+  });
+}
+
+/* ---------- การวาดกราฟิก ---------- */
+function drawAuraCircle(x, y, auraR, hue, isPlayer){
+  ctx.save();
+  ctx.translate(x - camera.x, y - camera.y);
+  
+  // เส้นวงกลมขอบเขตอิทธิพล
+  ctx.strokeStyle = isPlayer ? 'rgba(255, 215, 0, 0.8)' : `hsla(${hue}, 80%, 60%, 0.6)`;
+  ctx.lineWidth = isPlayer ? 3 : 2;
+  ctx.setLineDash([8, 6]);
+  ctx.beginPath(); ctx.arc(0, 0, auraR, 0, Math.PI*2); ctx.stroke();
+
+  // พื้นหลังวงกลมโปร่งใส
+  ctx.fillStyle = isPlayer ? 'rgba(255, 215, 0, 0.08)' : `hsla(${hue}, 80%, 60%, 0.05)`;
+  ctx.beginPath(); ctx.arc(0, 0, auraR, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawMinionsInAura(x, y, auraR, count, hue){
+  ctx.save();
+  ctx.translate(x - camera.x, y - camera.y);
+  const intCount = Math.floor(count);
+  for(let i=0; i<intCount; i++){
+    // กระจายลูกปลาว่ายวนรอบๆ ภายในเส้นวงกลม
+    const angle = S.t * 2 + (i * (Math.PI * 2 / Math.max(1, intCount)));
+    const dist = (auraR * 0.35) + Math.sin(S.t * 3 + i) * (auraR * 0.25);
+    const mx = Math.cos(angle) * dist;
+    const my = Math.sin(angle) * dist;
+
+    ctx.fillStyle = `hsl(${hue}, 85%, 65%)`;
+    ctx.beginPath(); ctx.arc(mx, my, 5, 0, Math.PI*2); ctx.fill();
+    
+    // หางลูกปลา
+    ctx.beginPath(); ctx.arc(mx - Math.cos(angle)*4, my - Math.sin(angle)*4, 3, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawFish(x, y, r, dir, level, hue, isPlayer){
+  ctx.save();
+  ctx.translate(x - camera.x, y - camera.y);
+  ctx.scale(dir, 1);
+
+  // ตัวปลา
+  ctx.fillStyle = `hsl(${hue}, 85%, 50%)`;
+  ctx.beginPath(); ctx.ellipse(0, 0, r, r*0.6, 0, 0, Math.PI*2); ctx.fill();
+
+  // หาง
+  ctx.beginPath(); ctx.moveTo(-r*0.8, 0);
+  ctx.lineTo(-r*1.3, -r*0.4); ctx.lineTo(-r*1.3, r*0.4); ctx.closePath(); ctx.fill();
+
+  // ตา
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(r*0.4, -r*0.15, 5, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(r*0.45, -r*0.15, 2.5, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+
+  // ป้ายแสดง Level
+  ctx.save();
+  ctx.translate(x - camera.x, y - camera.y - r - 12);
+  ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillStyle = isPlayer ? '#ffd700' : '#ffffff';
+  ctx.fillText('Lv.' + level, 0, 0);
+  ctx.restore();
+}
+
+function drawEnvironment(){
+  // น้ำทะเลสีฟ้าสดใส
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#48dbfb'); g.addColorStop(0.5, '#0abde3'); g.addColorStop(1, '#01a3a4');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // ฟองอากาศ
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+  for(const b of bubbles){
+    ctx.beginPath(); ctx.arc(b.x - camera.x, b.y - camera.y, b.r, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function draw(){
+  drawEnvironment();
+  if(S.mode==='menu') return;
+
+  // วาดลูกปลาอิสระตามฉาก
+  for(const fm of freeMinions){
+    ctx.fillStyle = `hsl(${fm.hue}, 90%, 60%)`;
+    ctx.beginPath(); ctx.arc(fm.x - camera.x, fm.y - camera.y, fm.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  // วาด AI
+  for(const f of S.fish){
+    drawAuraCircle(f.x, f.y, f.auraR, f.hue, false);
+    drawMinionsInAura(f.x, f.y, f.auraR, f.minions, f.hue);
+    drawFish(f.x, f.y, f.r, f.dir, f.level, f.hue, false);
+  }
+
+  // วาดผู้เล่น
+  drawAuraCircle(P.x, P.y, P.auraR, P.hue, true);
+  drawMinionsInAura(P.x, P.y, P.auraR, P.minions, P.hue);
+  drawFish(P.x, P.y, P.r, P.dir, P.level, P.hue, true);
+
+  hud();
+}
+
+function hud(){
+  ctx.fillStyle='#fff'; ctx.font='bold 18px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('💀 ฆ่าไปแล้ว: ' + S.kills + ' ตัว', 20, 35);
+  ctx.textAlign='right';
+  ctx.fillText('Level: ' + P.level + ' (ลูกปลาในวง: ' + Math.floor(P.minions) + ' ตัว)', W - 20, 35);
+}
+
+/* ---------- ระบบควบคุมแบบลากนิ้ว (แก้ไขบั๊กสัมผัส 100%) ---------- */
+let touchTarget = { x: 0, y: 0 };
+let isTouching = false;
+
+function updateTouchPosition(clientX, clientY){
+  // คำนวณทิศทางจากกลางหน้าจอไปยังจุดสัมผัส
+  const centerX = W / 2;
+  const centerY = H / 2;
+  const dx = clientX - centerX;
+  const dy = clientY - centerY;
+  const dist = Math.hypot(dx, dy);
+
+  if(dist > 10){
+    touchTarget.x = dx / dist;
+    touchTarget.y = dy / dist;
+  } else {
+    touchTarget.x = 0; touchTarget.y = 0;
+  }
+}
+
+addEventListener('touchstart', e => {
+  initAudio();
+  isTouching = true;
+  updateTouchPosition(e.touches[0].clientX, e.touches[0].clientY);
+}, {passive: false});
+
+addEventListener('touchmove', e => {
+  if(!isTouching) return;
+  updateTouchPosition(e.touches[0].clientX, e.touches[0].clientY);
+}, {passive: false});
+
+addEventListener('touchend', () => { isTouching = false; touchTarget = {x:0, y:0}; });
+addEventListener('touchcancel', () => { isTouching = false; touchTarget = {x:0, y:0}; });
+
+// รองรับ คีย์บอร์ด คอมพิวเตอร์
+const keys = {};
+addEventListener('keydown', e => { initAudio(); keys[e.code]=1; });
+addEventListener('keyup', e => keys[e.code]=0);
+
+let last = performance.now();
+function loop(n){
+  const dt = Math.min(.05, (n - last)/1000); last = n;
+  if(!isTouching){
+    touchTarget.x = (keys.ArrowRight||keys.KeyD?1:0) - (keys.ArrowLeft||keys.KeyA?1:0);
+    touchTarget.y = (keys.ArrowDown||keys.KeyS?1:0) - (keys.ArrowUp||keys.KeyW?1:0);
+  }
+  update(dt); draw(); requestAnimationFrame(loop);
+}
+
+menu(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
